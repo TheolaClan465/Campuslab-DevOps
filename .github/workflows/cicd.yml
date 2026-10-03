@@ -1,0 +1,249 @@
+name: Build and Deploy Microservice
+
+on:
+  repository_dispatch:
+    types: [deploy-service]
+
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Microservicio a desplegar
+        required: true
+        type: choice
+        options:
+          - bff
+          - catalog
+          - booking
+
+      ref:
+        description: Branch, tag o commit
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.event.client_payload.service || inputs.service }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ==========================================================
+      # 1. Determinar qué microservicio debemos procesar
+      # ==========================================================
+
+      - name: Resolver configuración del microservicio
+        id: config
+        shell: bash
+        env:
+          EVENT_SERVICE: ${{ github.event.client_payload.service }}
+          MANUAL_SERVICE: ${{ inputs.service }}
+          EVENT_SHA: ${{ github.event.client_payload.sha }}
+          MANUAL_REF: ${{ inputs.ref }}
+          SOURCE_OWNER: ${{ vars.SOURCE_OWNER }}
+
+        run: |
+          set -euo pipefail
+
+          SERVICE="${EVENT_SERVICE:-$MANUAL_SERVICE}"
+          REF="${EVENT_SHA:-$MANUAL_REF}"
+
+          case "$SERVICE" in
+
+            bff)
+              REPOSITORY="$SOURCE_OWNER/campuslab-ms-bff"
+              ECR_REPOSITORY="campuslab-ms-bff"
+              ;;
+
+            catalog)
+              REPOSITORY="$SOURCE_OWNER/campuslab-ms-catalog"
+              ECR_REPOSITORY="campuslab-ms-catalog"
+              ;;
+
+            booking)
+              REPOSITORY="$SOURCE_OWNER/campuslab-ms-bookings"
+              ECR_REPOSITORY="campuslab-ms-bookings"
+              ;;
+
+            *)
+              echo "Microservicio desconocido: $SERVICE"
+              exit 1
+              ;;
+
+          esac
+
+          echo "service=$SERVICE" >> "$GITHUB_OUTPUT"
+          echo "repository=$REPOSITORY" >> "$GITHUB_OUTPUT"
+          echo "ecr_repository=$ECR_REPOSITORY" >> "$GITHUB_OUTPUT"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
+          echo "Microservicio: $SERVICE"
+          echo "Repositorio: $REPOSITORY"
+          echo "Referencia: $REF"
+
+      # ==========================================================
+      # 2. Descargar repo privado
+      # ==========================================================
+
+      - name: Checkout microservicio
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: ${{ steps.config.outputs.repository }}
+          ref: ${{ steps.config.outputs.ref }}
+          token: ${{ secrets.SOURCE_REPOS_PAT }}
+          path: service
+
+      # ==========================================================
+      # 3. Obtener SHA real
+      # ==========================================================
+
+      - name: Obtener commit
+        id: git
+        working-directory: service
+        shell: bash
+        run: |
+          SHA=$(git rev-parse --short=12 HEAD)
+
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+          echo "Commit: $SHA"
+
+      # ==========================================================
+      # 4. Configurar credenciales de AWS
+      # ==========================================================
+
+      - name: Configurar AWS
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # ==========================================================
+      # 5. Iniciar sesión en Amazon ECR
+      # ==========================================================
+
+      - name: Login Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ==========================================================
+      # 6. Construir imagen
+      # ==========================================================
+
+      - name: Build Docker Image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ steps.config.outputs.ecr_repository }}
+          IMAGE_TAG: ${{ steps.git.outputs.sha }}
+
+        run: |
+          docker build \
+            -t "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
+            -t "$REGISTRY/$ECR_REPOSITORY:latest" \
+            ./service
+
+      # ==========================================================
+      # 7. Subir imagen a ECR
+      # ==========================================================
+
+      - name: Push Docker Image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ steps.config.outputs.ecr_repository }}
+          IMAGE_TAG: ${{ steps.git.outputs.sha }}
+
+        run: |
+          docker push "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker push "$REGISTRY/$ECR_REPOSITORY:latest"
+
+      # ==========================================================
+      # 8. Configurar SSH
+      # ==========================================================
+
+      - name: Configurar SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          BASTION_HOST: ${{ vars.BASTION_HOST }}
+          PRIVATE_EC2_HOST: ${{ vars.PRIVATE_EC2_HOST }}
+          BASTION_USER: ${{ vars.BASTION_USER }}
+          EC2_USER: ${{ vars.EC2_USER }}
+
+        run: |
+          mkdir -p ~/.ssh
+
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/ms-campuslab.pem
+
+          chmod 600 ~/.ssh/ms-campuslab.pem
+
+          cat > ~/.ssh/config << EOF
+
+          Host campus-bastion
+              HostName $BASTION_HOST
+              User $BASTION_USER
+              IdentityFile ~/.ssh/ms-campuslab.pem
+              IdentitiesOnly yes
+              StrictHostKeyChecking accept-new
+
+          Host campus-private
+              HostName $PRIVATE_EC2_HOST
+              User $EC2_USER
+              IdentityFile ~/.ssh/ms-campuslab.pem
+              IdentitiesOnly yes
+              ProxyJump campus-bastion
+              StrictHostKeyChecking accept-new
+
+          EOF
+
+          chmod 600 ~/.ssh/config
+
+      # ==========================================================
+      # 9. Login ECR desde EC2 privada
+      # ==========================================================
+
+      - name: Login ECR en EC2 privada
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+
+        run: |
+          aws ecr get-login-password \
+            --region "${{ vars.AWS_REGION }}" \
+          | ssh campus-private \
+            "sudo docker login \
+            --username AWS \
+            --password-stdin '$REGISTRY'"
+
+      # ==========================================================
+      # 10. Actualizar solamente el microservicio modificado
+      # ==========================================================
+
+      - name: Deploy
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          SERVICE: ${{ steps.config.outputs.service }}
+
+        run: |
+          ssh campus-private "
+            cd /ec2 &&
+
+            sudo env ECR_REGISTRY='$REGISTRY' \
+              docker compose pull '$SERVICE' &&
+
+            sudo env ECR_REGISTRY='$REGISTRY' \
+              docker compose up -d --no-deps '$SERVICE' &&
+
+            sudo docker image prune -f
+          "
+
+      # ==========================================================
+      # 11. Comprobar contenedores
+      # ==========================================================
+
+      - name: Estado final
+        run: |
+          ssh campus-private "sudo docker ps"
