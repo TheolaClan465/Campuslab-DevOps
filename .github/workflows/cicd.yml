@@ -229,15 +229,62 @@ jobs:
 
         run: |
           ssh campus-private "
-            cd /home/ec2-user &&
+            set -e
+
+            cd /home/ec2-user
+
+            echo '========================================='
+            echo 'Desplegando servicio: $SERVICE'
+            echo '========================================='
+
+            # Determinar nombre real del contenedor
+            case '$SERVICE' in
+              bff)
+                CONTAINER_NAME='campuslab-ms-bff'
+                ;;
+              catalog)
+                CONTAINER_NAME='campuslab-ms-catalog'
+                ;;
+              booking)
+                CONTAINER_NAME='campuslab-ms-bookings'
+                ;;
+              *)
+                echo 'Servicio desconocido: $SERVICE'
+                exit 1
+                ;;
+            esac
+
+            echo 'Contenedor: '\$CONTAINER_NAME
+
+            # Descargar primero la nueva imagen
+            sudo env ECR_REGISTRY='$REGISTRY' \
+              docker compose pull '$SERVICE'
+
+            # Eliminar solamente el contenedor anterior si existe
+            if sudo docker ps -a \
+              --format '{{.Names}}' \
+              | grep -qx \"\$CONTAINER_NAME\"; then
+
+              echo 'Eliminando contenedor anterior...'
+
+              sudo docker rm -f \"\$CONTAINER_NAME\"
+            else
+              echo 'No existe un contenedor anterior.'
+            fi
+
+            # Crear el nuevo contenedor
+            echo 'Levantando nueva versión...'
 
             sudo env ECR_REGISTRY='$REGISTRY' \
-              docker compose pull '$SERVICE' &&
+              docker compose up -d \
+              --no-deps \
+              --force-recreate \
+              '$SERVICE'
 
-            sudo env ECR_REGISTRY='$REGISTRY' \
-              docker compose up -d --no-deps '$SERVICE' &&
-
+            # Limpiar imágenes antiguas sin uso
             sudo docker image prune -f
+
+            echo 'Deploy completado.'
           "
 
       # ==========================================================
