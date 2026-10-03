@@ -229,7 +229,7 @@ jobs:
 
         run: |
           ssh campus-private "
-            cd /ec2 &&
+            cd /home/ec2-user &&
 
             sudo env ECR_REGISTRY='$REGISTRY' \
               docker compose pull '$SERVICE' &&
