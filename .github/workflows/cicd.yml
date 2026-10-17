@@ -14,6 +14,7 @@ on:
           - bff
           - catalog
           - booking
+          - notify
 
       ref:
         description: Branch, tag o commit
@@ -25,13 +26,19 @@ permissions:
 
 concurrency:
   group: deploy-${{ github.event.client_payload.service || inputs.service }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
+      - name: Checkout pipeline
+        uses: actions/checkout@v7.0.1
+        with:
+          path: pipeline
+          persist-credentials: false
       # ==========================================================
       # 1. Determinar qué microservicio debemos procesar
       # ==========================================================
@@ -50,7 +57,11 @@ jobs:
           set -euo pipefail
 
           SERVICE="${EVENT_SERVICE:-$MANUAL_SERVICE}"
-          REF="${EVENT_SHA:-$MANUAL_REF}"
+          REF="${EVENT_SHA:-${MANUAL_REF:-main}}"
+          [[ "$SOURCE_OWNER" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || { echo 'Configura SOURCE_OWNER'; exit 1; }
+          [[ "$REF" != *$'\n'* && "$REF" != *$'\r'* ]] || exit 1
+          DOCKER_CONTEXT="./service"
+          DOCKERFILE="./service/Dockerfile"
 
           case "$SERVICE" in
 
@@ -69,6 +80,11 @@ jobs:
               ECR_REPOSITORY="campuslab-ms-bookings"
               ;;
 
+            notify)
+              REPOSITORY="$SOURCE_OWNER/campuslab-ms-notify"
+              ECR_REPOSITORY="campuslab-ms-notify"
+              ;;
+
             *)
               echo "Microservicio desconocido: $SERVICE"
               exit 1
@@ -80,6 +96,8 @@ jobs:
           echo "repository=$REPOSITORY" >> "$GITHUB_OUTPUT"
           echo "ecr_repository=$ECR_REPOSITORY" >> "$GITHUB_OUTPUT"
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "docker_context=$DOCKER_CONTEXT" >> "$GITHUB_OUTPUT"
+          echo "dockerfile=$DOCKERFILE" >> "$GITHUB_OUTPUT"
 
           echo "Microservicio: $SERVICE"
           echo "Repositorio: $REPOSITORY"
@@ -96,6 +114,7 @@ jobs:
           ref: ${{ steps.config.outputs.ref }}
           token: ${{ secrets.SOURCE_REPOS_PAT }}
           path: service
+          persist-credentials: false
 
       # ==========================================================
       # 3. Obtener SHA real
@@ -106,7 +125,7 @@ jobs:
         working-directory: service
         shell: bash
         run: |
-          SHA=$(git rev-parse --short=12 HEAD)
+          SHA=$(git rev-parse HEAD)
 
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
@@ -141,12 +160,16 @@ jobs:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ steps.config.outputs.ecr_repository }}
           IMAGE_TAG: ${{ steps.git.outputs.sha }}
+          DOCKER_CONTEXT: ${{ steps.config.outputs.docker_context }}
+          DOCKERFILE: ${{ steps.config.outputs.dockerfile }}
 
         run: |
+          set -euo pipefail
           docker build \
             -t "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
             -t "$REGISTRY/$ECR_REPOSITORY:latest" \
-            ./service
+            -f "$DOCKERFILE" \
+            "$DOCKER_CONTEXT"
 
       # ==========================================================
       # 7. Subir imagen a ECR
@@ -159,6 +182,7 @@ jobs:
           IMAGE_TAG: ${{ steps.git.outputs.sha }}
 
         run: |
+          set -euo pipefail
           docker push "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
           docker push "$REGISTRY/$ECR_REPOSITORY:latest"
 
@@ -171,13 +195,21 @@ jobs:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           BASTION_HOST: ${{ vars.BASTION_HOST }}
           PRIVATE_EC2_HOST: ${{ vars.PRIVATE_EC2_HOST }}
-          BASTION_USER: ${{ vars.BASTION_USER }}
-          EC2_USER: ${{ vars.EC2_USER }}
+          BASTION_USER: ${{ vars.BASTION_USER || 'ec2-user' }}
+          EC2_USER: ${{ vars.EC2_USER || 'ec2-user' }}
 
         run: |
+          set -euo pipefail
+          test -n "$SSH_PRIVATE_KEY"
+          for HOST in "$BASTION_HOST" "$PRIVATE_EC2_HOST"; do
+            [[ "$HOST" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || exit 1
+          done
+          for USER in "$BASTION_USER" "$EC2_USER"; do
+            [[ "$USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || exit 1
+          done
           mkdir -p ~/.ssh
 
-          echo "$SSH_PRIVATE_KEY" > ~/.ssh/ms-campuslab.pem
+          printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/ms-campuslab.pem
 
           chmod 600 ~/.ssh/ms-campuslab.pem
 
@@ -188,6 +220,8 @@ jobs:
               User $BASTION_USER
               IdentityFile ~/.ssh/ms-campuslab.pem
               IdentitiesOnly yes
+              BatchMode yes
+              ConnectTimeout 15
               StrictHostKeyChecking accept-new
 
           Host campus-private
@@ -196,11 +230,28 @@ jobs:
               IdentityFile ~/.ssh/ms-campuslab.pem
               IdentitiesOnly yes
               ProxyJump campus-bastion
+              BatchMode yes
+              ConnectTimeout 15
               StrictHostKeyChecking accept-new
 
           EOF
 
           chmod 600 ~/.ssh/config
+
+      - name: Comprobar servicio en Compose remoto
+        env:
+          DEPLOY_DIR: ${{ vars.DEPLOY_DIR || '/home/ec2-user' }}
+          SERVICE: ${{ steps.config.outputs.service }}
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          printf -v COMMAND 'bash -s -- %q %q %q' "$DEPLOY_DIR" "$SERVICE" "$REGISTRY"
+          ssh campus-private "$COMMAND" <<'REMOTE'
+          set -euo pipefail
+          cd "$1"
+          command -v flock >/dev/null
+          sudo -n env ECR_REGISTRY="$3" docker compose config --services | grep -Fx -- "$2"
+          REMOTE
 
       # ==========================================================
       # 9. Login ECR desde EC2 privada
@@ -209,14 +260,13 @@ jobs:
       - name: Login ECR en EC2 privada
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
 
         run: |
+          set -euo pipefail
+          printf -v COMMAND 'sudo -n docker login --username AWS --password-stdin %q' "$REGISTRY"
           aws ecr get-login-password \
-            --region "${{ vars.AWS_REGION }}" \
-          | ssh campus-private \
-            "sudo docker login \
-            --username AWS \
-            --password-stdin '$REGISTRY'"
+            --region "$AWS_REGION" | ssh campus-private "$COMMAND"
 
       # ==========================================================
       # 10. Actualizar solamente el microservicio modificado
@@ -226,66 +276,15 @@ jobs:
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           SERVICE: ${{ steps.config.outputs.service }}
+          DEPLOY_DIR: ${{ vars.DEPLOY_DIR || '/home/ec2-user' }}
+          REPOSITORY: ${{ steps.config.outputs.ecr_repository }}
+          IMAGE_TAG: ${{ steps.git.outputs.sha }}
 
         run: |
-          ssh campus-private "
-            set -e
-
-            cd /home/ec2-user
-
-            echo '========================================='
-            echo 'Desplegando servicio: $SERVICE'
-            echo '========================================='
-
-            # Determinar nombre real del contenedor
-            case '$SERVICE' in
-              bff)
-                CONTAINER_NAME='campuslab-ms-bff'
-                ;;
-              catalog)
-                CONTAINER_NAME='campuslab-ms-catalog'
-                ;;
-              booking)
-                CONTAINER_NAME='campuslab-ms-bookings'
-                ;;
-              *)
-                echo 'Servicio desconocido: $SERVICE'
-                exit 1
-                ;;
-            esac
-
-            echo 'Contenedor: '\$CONTAINER_NAME
-
-            # Descargar primero la nueva imagen
-            sudo env ECR_REGISTRY='$REGISTRY' \
-              docker compose pull '$SERVICE'
-
-            # Eliminar solamente el contenedor anterior si existe
-            if sudo docker ps -a \
-              --format '{{.Names}}' \
-              | grep -qx \"\$CONTAINER_NAME\"; then
-
-              echo 'Eliminando contenedor anterior...'
-
-              sudo docker rm -f \"\$CONTAINER_NAME\"
-            else
-              echo 'No existe un contenedor anterior.'
-            fi
-
-            # Crear el nuevo contenedor
-            echo 'Levantando nueva versión...'
-
-            sudo env ECR_REGISTRY='$REGISTRY' \
-              docker compose up -d \
-              --no-deps \
-              --force-recreate \
-              '$SERVICE'
-
-            # Limpiar imágenes antiguas sin uso
-            sudo docker image prune -f
-
-            echo 'Deploy completado.'
-          "
+          set -euo pipefail
+          printf -v COMMAND 'bash -s -- %q %q %q %q' \
+            "$DEPLOY_DIR" "$SERVICE" "$REGISTRY" "$REGISTRY/$REPOSITORY:$IMAGE_TAG"
+          ssh campus-private "$COMMAND" < pipeline/ec2/deploy.sh
 
       # ==========================================================
       # 11. Comprobar contenedores
@@ -294,3 +293,7 @@ jobs:
       - name: Estado final
         run: |
           ssh campus-private "sudo docker ps"
+
+      - name: Limpiar clave SSH del runner
+        if: always()
+        run: rm -f ~/.ssh/ms-campuslab.pem ~/.ssh/config
