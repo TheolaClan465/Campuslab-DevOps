@@ -60,7 +60,7 @@ jobs:
           REF="${EVENT_SHA:-${MANUAL_REF:-main}}"
           [[ "$SOURCE_OWNER" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || { echo 'Configura SOURCE_OWNER'; exit 1; }
           [[ "$REF" != *$'\n'* && "$REF" != *$'\r'* ]] || exit 1
-          DOCKER_CONTEXT="./service"
+          BUILD_CONTEXT="./service"
           DOCKERFILE="./service/Dockerfile"
 
           case "$SERVICE" in
@@ -96,7 +96,7 @@ jobs:
           echo "repository=$REPOSITORY" >> "$GITHUB_OUTPUT"
           echo "ecr_repository=$ECR_REPOSITORY" >> "$GITHUB_OUTPUT"
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
-          echo "docker_context=$DOCKER_CONTEXT" >> "$GITHUB_OUTPUT"
+          echo "build_context=$BUILD_CONTEXT" >> "$GITHUB_OUTPUT"
           echo "dockerfile=$DOCKERFILE" >> "$GITHUB_OUTPUT"
 
           echo "Microservicio: $SERVICE"
@@ -160,7 +160,7 @@ jobs:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ steps.config.outputs.ecr_repository }}
           IMAGE_TAG: ${{ steps.git.outputs.sha }}
-          DOCKER_CONTEXT: ${{ steps.config.outputs.docker_context }}
+          BUILD_CONTEXT: ${{ steps.config.outputs.build_context }}
           DOCKERFILE: ${{ steps.config.outputs.dockerfile }}
 
         run: |
@@ -169,7 +169,7 @@ jobs:
             -t "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
             -t "$REGISTRY/$ECR_REPOSITORY:latest" \
             -f "$DOCKERFILE" \
-            "$DOCKER_CONTEXT"
+            "$BUILD_CONTEXT"
 
       # ==========================================================
       # 7. Subir imagen a ECR
