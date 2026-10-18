@@ -248,9 +248,19 @@ jobs:
           printf -v COMMAND 'bash -s -- %q %q %q' "$DEPLOY_DIR" "$SERVICE" "$REGISTRY"
           ssh campus-private "$COMMAND" <<'REMOTE'
           set -euo pipefail
-          cd "$1"
-          command -v flock >/dev/null
-          sudo -n env ECR_REGISTRY="$3" docker compose config --services | grep -Fx -- "$2"
+          cd "$1" || { echo "ERROR: DEPLOY_DIR no existe: $1"; exit 1; }
+          echo "Carpeta de despliegue: $PWD"
+          command -v flock >/dev/null || { echo 'ERROR: falta flock en EC2'; exit 1; }
+          if ! SERVICES=$(sudo -n env ECR_REGISTRY="$3" docker compose config --services); then
+            echo 'ERROR: no se pudo leer Compose. Revisar archivo, .env, variables requeridas y permisos Docker/sudo.'
+            exit 1
+          fi
+          printf 'Servicios encontrados:\n%s\n' "$SERVICES"
+          if ! grep -Fx -- "$2" <<< "$SERVICES"; then
+            echo "ERROR: el Compose remoto no incluye el servicio $2."
+            echo 'Copiar el docker-compose.yml actualizado de back a DEPLOY_DIR y revisar overrides/COMPOSE_FILE.'
+            exit 1
+          fi
           REMOTE
 
       # ==========================================================
