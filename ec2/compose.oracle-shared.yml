@@ -1,0 +1,47 @@
+# Optional EC2 overlay. Keep the original Oracle URLs, users, wallets and H2 volumes in docker-compose.yml.
+# docker compose --env-file .env --env-file .env.oracle-shared -f docker-compose.yml -f compose.oracle-shared.yml up -d
+services:
+  catalog:
+    environment:
+      SPRING_DATASOURCE_URL: ${SHARED_ORACLE_JDBC_URL:?Prepare the shared Oracle schemas first}
+      SPRING_DATASOURCE_USERNAME: CL_CATALOG
+      SPRING_DATASOURCE_PASSWORD: ${ORACLE_CL_CATALOG_PASSWORD:?Missing schema password}
+      SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: 3
+      SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE: 1
+    volumes: !override
+      - ${SHARED_ORACLE_WALLET_DIR:-./Wallet_CampusLabBookingDB}:/app/wallet:ro
+
+  booking:
+    environment:
+      SPRING_DATASOURCE_URL: ${SHARED_ORACLE_JDBC_URL}
+      SPRING_DATASOURCE_USERNAME: CL_BOOKINGS
+      SPRING_DATASOURCE_PASSWORD: ${ORACLE_CL_BOOKINGS_PASSWORD:?Missing schema password}
+      SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: 3
+      SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE: 1
+    volumes: !override
+      - ${SHARED_ORACLE_WALLET_DIR:-./Wallet_CampusLabBookingDB}:/app/wallet:ro
+
+  audit:
+    environment:
+      SPRING_DATASOURCE_URL: ${SHARED_ORACLE_JDBC_URL}
+      SPRING_DATASOURCE_USERNAME: CL_AUDIT
+      SPRING_DATASOURCE_PASSWORD: ${ORACLE_CL_AUDIT_PASSWORD:?Missing schema password}
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: oracle.jdbc.OracleDriver
+      SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: 3
+      SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE: 1
+      # New consumer group replays retained events into the new cloud schema.
+      SPRING_KAFKA_CONSUMER_GROUP_ID: campuslab-audit-oracle-shared-v1
+    volumes: !override
+      - ${SHARED_ORACLE_WALLET_DIR:-./Wallet_CampusLabBookingDB}:/app/wallet:ro
+
+  report:
+    environment:
+      SPRING_DATASOURCE_URL: ${SHARED_ORACLE_JDBC_URL}
+      SPRING_DATASOURCE_USERNAME: CL_REPORT
+      SPRING_DATASOURCE_PASSWORD: ${ORACLE_CL_REPORT_PASSWORD:?Missing schema password}
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: oracle.jdbc.OracleDriver
+      SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: 3
+      SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE: 1
+      SPRING_KAFKA_CONSUMER_GROUP_ID: campuslab-report-oracle-shared-v1
+    volumes: !override
+      - ${SHARED_ORACLE_WALLET_DIR:-./Wallet_CampusLabBookingDB}:/app/wallet:ro

@@ -15,6 +15,10 @@ on:
           - catalog
           - booking
           - notify
+          - rabbit
+          - audit
+          - ms-kafka
+          - report
 
       ref:
         description: Branch, tag o commit
@@ -83,6 +87,26 @@ jobs:
             notify)
               REPOSITORY="$SOURCE_OWNER/campuslab-ms-notify"
               ECR_REPOSITORY="campuslab-ms-notify"
+              ;;
+
+            rabbit)
+              REPOSITORY="$SOURCE_OWNER/ms-rabbitmq"
+              ECR_REPOSITORY="campuslab-ms-rabbit"
+              ;;
+
+            audit)
+              REPOSITORY="$SOURCE_OWNER/campuslab-ms-audit"
+              ECR_REPOSITORY="campuslab-ms-audit"
+              ;;
+
+            ms-kafka)
+              REPOSITORY="$SOURCE_OWNER/ms-kafka"
+              ECR_REPOSITORY="ms-kafka"
+              ;;
+
+            report)
+              REPOSITORY="$SOURCE_OWNER/campuslab-ms-report"
+              ECR_REPOSITORY="campuslab-ms-report"
               ;;
 
             *)

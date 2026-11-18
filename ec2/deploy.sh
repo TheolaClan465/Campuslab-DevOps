@@ -10,7 +10,11 @@ case "$SERVICE" in
   bff) PORT=8080 ;;
   catalog) PORT=8081 ;;
   booking) PORT=8082 ;;
-  notify) PORT= ;;
+  notify) PORT=8084 ;;
+  rabbit) PORT=8083 ;;
+  audit) PORT=8085 ;;
+  ms-kafka) PORT=8086 ;;
+  report) PORT=8087 ;;
   *) echo 'Servicio no permitido'; exit 1 ;;
 esac
 [[ "$REGISTRY" =~ ^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com$ ]] || exit 1
@@ -34,15 +38,25 @@ else
   done
 fi
 [[ ${#BASE_FILES[@]} -gt 0 ]] || { echo 'No se encontró el Compose'; exit 1; }
-compose() { sudo -n env ECR_REGISTRY="$REGISTRY" docker compose "${BASE_FILES[@]}" "$@"; }
+ENV_FILES=()
+# Opt-in only: copying the new files must not silently switch a running deployment.
+if [[ -f compose.oracle-shared.yml && -f .env.oracle-shared ]] && grep -Eq $'^SHARED_ORACLE_ENABLED=true\r?$' .env.oracle-shared; then
+  ENV_FILES=(--env-file .env --env-file .env.oracle-shared)
+  BASE_FILES+=(-f compose.oracle-shared.yml)
+fi
+compose() { sudo -n env ECR_REGISTRY="$REGISTRY" docker compose "${ENV_FILES[@]}" "${BASE_FILES[@]}" "$@"; }
 compose config --services | grep -Fx -- "$SERVICE" >/dev/null
 
 # Descarga antes de reemplazar. No elimina el contenedor manualmente.
 sudo -n docker pull "$IMAGE"
 EXPECTED_IMAGE=$(sudo -n docker image inspect --format '{{.Id}}' "$IMAGE")
-# Notify necesita el broker y el SMTP de prueba de este mismo Compose.
+# Inicia la infraestructura que necesita cada servicio.
 if [[ "$SERVICE" == notify ]]; then
-  compose up -d --wait --wait-timeout 180 rabbitmq mailpit
+  compose up -d --wait --wait-timeout 180 mailpit
+elif [[ "$SERVICE" == rabbit ]]; then
+  compose up -d --wait --wait-timeout 180 rabbitmq
+elif [[ "$SERVICE" == audit || "$SERVICE" == booking || "$SERVICE" == ms-kafka || "$SERVICE" == report ]]; then
+  compose up -d --wait --wait-timeout 180 kafka
 fi
 # Usa el commit exacto aunque otro workflow cambie latest.
 OVERRIDE=$(mktemp "$DEPLOY_DIR/.deploy-image.XXXXXX.yml")
